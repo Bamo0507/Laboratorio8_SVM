@@ -1,0 +1,203 @@
+---
+title: "Laboratorio 8 - Máquinas Vectoriales de Soporte (SVM)"
+author: "Bryan Martínez, Adriana Palacios, y Nery Molina"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(e1071)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(glmnet)
+library(pROC)
+library(nnet)
+library(kernlab)
+load("listings.RData")
+
+listings$price <- as.numeric(gsub("[$,]", "", listings$price))
+
+vars_eliminar <- c(
+  "id", "listing_url", "scrape_id", "picture_url",
+  "host_id", "host_url", "host_thumbnail_url", "host_picture_url",
+  "name", "description", "neighborhood_overview", "host_about",
+  "host_name", "host_location", "amenities", "host_verifications",
+  "source", "last_scraped", "calendar_last_scraped", "calendar_updated",
+  "host_since", "first_review", "last_review",
+  "bathrooms_text", "host_total_listings_count", "neighbourhood",
+  "minimum_nights_avg_ntm", "maximum_nights_avg_ntm",
+  "number_of_reviews_ltm", "number_of_reviews_l30d", "number_of_reviews_ly",
+  "calculated_host_listings_count_entire_homes",
+  "calculated_host_listings_count_private_rooms",
+  "calculated_host_listings_count_shared_rooms",
+  "estimated_revenue_l365d",
+  "host_has_profile_pic", "neighbourhood_group_cleansed"
+)
+
+listings_clean <- listings[, !(names(listings) %in% vars_eliminar)]
+listings_model <- listings_clean[!is.na(listings_clean$price), ]
+
+set.seed(42)
+trainIndex <- sample(seq_len(nrow(listings_model)), size = floor(0.7 * nrow(listings_model)))
+train <- listings_model[ trainIndex, ]
+test <- listings_model[-trainIndex, ]
+
+train_num <- na.omit(train[, sapply(train, is.numeric)])
+test_num  <- test[, names(train_num)]
+test_num  <- na.omit(test_num)
+
+q33 <- as.numeric(quantile(train_num$price, probs = 0.33, na.rm = TRUE))
+q67 <- as.numeric(quantile(train_num$price, probs = 0.67, na.rm = TRUE))
+
+train_clf <- train_num %>%
+  mutate(price_cat = cut(price, breaks = c(-Inf, q33, q67, Inf),
+                         labels = c("Economica", "Intermedia", "Cara"),
+                         right = TRUE, ordered_result = TRUE))
+
+test_clf <- test_num %>%
+  mutate(price_cat = cut(price, breaks = c(-Inf, q33, q67, Inf),
+                         labels = c("Economica", "Intermedia", "Cara"),
+                         right = TRUE, ordered_result = TRUE))
+
+train_tree_clf <- train_clf %>% select(-price)
+test_tree_clf  <- test_clf  %>% select(-price)
+
+calc_rmse <- function(obs, pred) sqrt(mean((obs - pred)^2, na.rm = TRUE))
+calc_mae  <- function(obs, pred) mean(abs(obs - pred), na.rm = TRUE)
+calc_r2   <- function(obs, pred) {
+  ss_res <- sum((obs - pred)^2, na.rm = TRUE)
+  ss_tot <- sum((obs - mean(obs, na.rm = TRUE))^2, na.rm = TRUE)
+  1 - ss_res / ss_tot
+}
+```
+
+## **Repositorio**
+
+https://github.com/Bamo0507/Laboratorio8_SVM
+
+---
+
+## **Actividad 1 — Conjuntos de Entrenamiento y Prueba**
+
+Se utilizan los mismos conjuntos de entrenamiento y prueba que han sido empleados en los laboratorios anteriores. Se mantienen en una partición 70-30 sobre el dataset de propiedades de Airbnb. Esto nos permite que los modelos generados sean comparables, al garantizar que se están trabajando bajo las mismas condiciones.
+
+```{r confirmacion-sets}
+cat("Total de filas en el dataset:", nrow(listings_model), "\n")
+cat("Datos de entrenamiento:", nrow(train_num), "\n")
+cat("Datos de prueba:", nrow(test_num), "\n")
+cat("Limite superior Economica (q33):", q33, "\n")
+cat("Limite superior Intermedia (q67):", q67, "\n")
+```
+
+---
+
+## **Actividad 2 — Exploración y Transformaciones para SVM**
+
+SVM utiliza distancias para determinar a qué categoría va a pertenecer un punto. Dada esta característica del modelo, es necesario escalar los datos, ya que si tenemos escalas muy distintas, ciertas variables van a tener un peso mucho mayor que otras. Por ejemplo, si las unidades de una variable están en millones y las otras están en unidades, haciendo que una domine el cálculo y que la escala termine no representando adecuadamente a las distintas propiedades del dataset. Dada esta situación, se pasa por una etapa de estandarización de los datos.
+
+```{r exploracion-resumen}
+cat("Variables disponibles en el set de clasificacion:", ncol(train_tree_clf) - 1, "\n")
+cat("Distribucion de la variable respuesta en entrenamiento:\n")
+print(table(train_tree_clf$price_cat))
+cat("\nDistribucion en prueba:\n")
+print(table(test_tree_clf$price_cat))
+```
+
+```{r exploracion-escala}
+features_num <- train_tree_clf %>% select(-price_cat)
+resumen_escala <- data.frame(
+  Variable = names(features_num),
+  Min  = sapply(features_num, min,  na.rm = TRUE),
+  Max  = sapply(features_num, max,  na.rm = TRUE),
+  Media = sapply(features_num, mean, na.rm = TRUE),
+  SD   = sapply(features_num, sd,   na.rm = TRUE)
+)
+knitr::kable(head(resumen_escala, 10), digits = 2,
+             caption = "Resumen de escala de las primeras 10 variables")
+```
+
+```{r escalado}
+scale_center <- colMeans(features_num)
+scale_sd <- apply(features_num, 2, sd)
+
+train_svm <- as.data.frame(scale(features_num,
+                                  center = scale_center,
+                                  scale  = scale_sd))
+train_svm$price_cat <- train_tree_clf$price_cat
+
+test_features <- test_tree_clf %>% select(-price_cat)
+test_svm <- as.data.frame(scale(test_features,
+                                 center = scale_center,
+                                 scale  = scale_sd))
+test_svm$price_cat <- test_tree_clf$price_cat
+
+cat("Dimensiones train_svm:", nrow(train_svm), "x", ncol(train_svm), "\n")
+cat("Dimensiones test_svm: ", nrow(test_svm),  "x", ncol(test_svm),  "\n")
+```
+
+---
+
+## **Actividad 3 — Variable Respuesta**
+
+La variable respuesta es `price_cat`, esta representa la categoría de precio de cada una de las casas. Las categorías se establecen según los percentiles del precio 33 y 67. De esta forma, se van clasificando:
+
+- Si es menor o igual al percentil 33, es "Economica".
+- Si está entre el percentil 33 y 67, es "Intermedia".
+- En caso contrario, es "Cara".  
+
+Esta es la misma categorización que se ha venido utilizando en laboratorios anteriores, en donde se ha ido trabajando con modelos de categorización.
+
+```{r variable-respuesta}
+cat("Clases en la variable respuesta:", levels(train_svm$price_cat), "\n")
+cat("Distribucion en entrenamiento:\n")
+print(prop.table(table(train_svm$price_cat)))
+```
+
+---
+
+## **Actividad 4 — Modelos SVM con Diferentes Kernels**
+
+---
+
+## **Actividad 5 — Predicción con los Modelos SVM**
+
+---
+
+## **Actividad 6 — Matrices de Confusión**
+
+---
+
+## **Actividad 7 — Análisis de Sobreajuste y Desajuste**
+
+---
+
+## **Actividad 8 — Comparación entre Modelos SVM**
+
+---
+
+## **Actividad 9 — Comparación con Modelos de Clasificación Anteriores**
+
+---
+
+## **Actividad 10 — Tabla Comparativa de Sobreajuste (Todos los Modelos)**
+
+---
+
+## **Actividad 11 — Modelo de Regresión SVR**
+
+---
+
+## **Actividad 12 — Comparación SVR con Modelos de Regresión Anteriores**
+
+---
+
+## **Actividad 13 — Informe de Resultados**
