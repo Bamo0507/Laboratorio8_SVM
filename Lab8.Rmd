@@ -301,6 +301,75 @@ En cuanto al modelo lineal, presenta una dinámica distinta: sobreestima signifi
 
 ## **Actividad 6 — Matrices de Confusión**
 
+Para evaluar los modelos SVM entrenados, se generan las matrices de confusión usando el conjunto de prueba. Esto permite comparar las categorías reales contra las categorías predichas por cada modelo y observar en qué clases se presentan más errores.
+
+```{r actividad-6-matrices-confusion}
+pred_lineal <- predict(modelo_lineal, newdata = test_svm)
+pred_rbf <- predict(modelo_rbf, newdata = test_svm)
+pred_rbf_tuned <- predict(modelo_rbf_tuned, newdata = test_svm)
+
+cm_lineal <- confusionMatrix(
+  data = pred_lineal,
+  reference = test_svm$price_cat
+)
+
+cm_rbf <- confusionMatrix(
+  data = pred_rbf,
+  reference = test_svm$price_cat
+)
+
+cm_rbf_tuned <- confusionMatrix(
+  data = pred_rbf_tuned,
+  reference = test_svm$price_cat
+)
+
+cat("Matriz de confusion — Modelo 1: SVM Lineal\n")
+print(cm_lineal$table)
+
+cat("\nMetricas generales — Modelo 1: SVM Lineal\n")
+print(cm_lineal$overall)
+
+cat("\nMetricas por clase — Modelo 1: SVM Lineal\n")
+print(cm_lineal$byClass)
+
+cat("\n\nMatriz de confusion — Modelo 2: SVM RBF\n")
+print(cm_rbf$table)
+
+cat("\nMetricas generales — Modelo 2: SVM RBF\n")
+print(cm_rbf$overall)
+
+cat("\nMetricas por clase — Modelo 2: SVM RBF\n")
+print(cm_rbf$byClass)
+
+cat("\n\nMatriz de confusion — Modelo 3: SVM RBF Tuneado\n")
+print(cm_rbf_tuned$table)
+
+cat("\nMetricas generales — Modelo 3: SVM RBF Tuneado\n")
+print(cm_rbf_tuned$overall)
+
+cat("\nMetricas por clase — Modelo 3: SVM RBF Tuneado\n")
+print(cm_rbf_tuned$byClass)
+
+resumen_svm <- data.frame(
+  Modelo = c("SVM Lineal", "SVM RBF", "SVM RBF Tuneado"),
+  Accuracy = c(
+    cm_lineal$overall["Accuracy"],
+    cm_rbf$overall["Accuracy"],
+    cm_rbf_tuned$overall["Accuracy"]
+  ),
+  Kappa = c(
+    cm_lineal$overall["Kappa"],
+    cm_rbf$overall["Kappa"],
+    cm_rbf_tuned$overall["Kappa"]
+  )
+)
+
+knitr::kable(
+  resumen_svm,
+  digits = 4,
+  caption = "Comparación general de los modelos SVM"
+)
+```
 ---
 
 ## **Actividad 7 — Análisis de Sobreajuste y Desajuste**
