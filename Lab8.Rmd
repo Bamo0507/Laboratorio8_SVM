@@ -262,6 +262,41 @@ Al comparar los dos modelos iniciales, el RBF presentó mejores resultados que l
 
 ## **Actividad 5 — Predicción con los Modelos SVM**
 
+Con los tres modelos entrenados, se generan las predicciones sobre el conjunto de prueba para evaluar qué tan efectivo es cada uno al clasificar las propiedades en Economica, Intermedia y Cara. Se registra además el tiempo de predicción de cada modelo, dato relevante para la comparación de eficiencia en actividades posteriores.
+
+```{r predicciones}
+tiempo_lineal <- system.time(
+  pred_lineal <- predict(modelo_lineal, newdata = test_svm)
+)
+
+tiempo_rbf <- system.time(
+  pred_rbf <- predict(modelo_rbf, newdata = test_svm)
+)
+
+tiempo_rbf_tuned <- system.time(
+  pred_rbf_tuned <- predict(modelo_rbf_tuned, newdata = test_svm)
+)
+
+cat("Tiempo de prediccion — Modelo 1 (Lineal): ", round(tiempo_lineal["elapsed"], 4), "s\n")
+cat("Tiempo de prediccion — Modelo 2 (RBF): ", round(tiempo_rbf["elapsed"], 4), "s\n")
+cat("Tiempo de prediccion — Modelo 3 (RBF tuned): ", round(tiempo_rbf_tuned["elapsed"], 4), "s\n")
+```
+
+```{r distribucion-predicciones}
+cat("Distribucion de predicciones — Modelo 1 (Lineal):\n")
+print(table(pred_lineal))
+cat("\nDistribucion de predicciones — Modelo 2 (RBF):\n")
+print(table(pred_rbf))
+cat("\nDistribucion de predicciones — Modelo 3 (RBF tuned):\n")
+print(table(pred_rbf_tuned))
+cat("\nDistribucion real en prueba:\n")
+print(table(test_svm$price_cat))
+```
+
+Al contrastar las predicciones de los tres modelos contra la distribución real del conjunto de prueba, se observa un comportamiento peculiar. Los modelos RBF logran clasificar cantidades similares de propiedades económicas e intermedias respecto a la realidad, pero se exceden en ambas categorías a costa de subestimar la categoría cara, repitiendo el patrón de sesgo identificado en laboratorios anteriores. El segundo modelo predijo 5,608 propiedades caras y el tercero 5,587, cuando el valor real es 6,119.
+
+En cuanto al modelo lineal, presenta una dinámica distinta: sobreestima significativamente la categoría económica (6,906 frente a 6,185 reales) y subestima la intermedia (5,879 frente a 6,362 reales). Sin embargo, es el modelo que más se acerca al valor real en la categoría cara, con 5,881 predicciones frente a 6,119 reales. Las matrices de confusión de la siguiente actividad permitirán cuantificar con mayor precisión dónde se concentran los errores de cada modelo.
+
 ---
 
 ## **Actividad 6 — Matrices de Confusión**
