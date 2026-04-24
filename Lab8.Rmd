@@ -166,6 +166,98 @@ print(prop.table(table(train_svm$price_cat)))
 
 ## **Actividad 4 — Modelos SVM con Diferentes Kernels**
 
+Para no definir los hiperparámetros a prueba y error, se realiza un tuneo sobre un conjunto de hiperparámetros sobre un subconjunto de 1,500 observaciones del conjunto de entrenamiento. Esto permite identificar qué kernel y qué rango de valores de C y gamma ofrecen mejores resultados antes de entrenar los modelos completos. Se utiliza validación cruzada con cinco pliegues, lo que significa que el subconjunto se divide en cinco partes: cuatro se usan para entrenar y una para validar, rotando hasta que cada parte haya servido como validación una vez, y los resultados se promedian.
+
+```{r tune-exploratorio}
+set.seed(123)
+idx_tune <- sample(nrow(train_svm), 1500)
+train_tune <- train_svm[idx_tune, ]
+
+tune_lineal <- tune(svm, price_cat ~ ., data = train_tune,
+kernel = "linear",
+ranges = list(cost = c(0.1, 1, 10)),
+tunecontrol = tune.control(sampling = "cross", cross = 5))
+
+tune_rbf <- tune(svm, price_cat ~ ., data = train_tune,
+kernel = "radial",
+ranges = list(cost = c(0.1, 1, 10),
+gamma = c(0.01, 0.1, 1)),
+tunecontrol = tune.control(sampling = "cross", cross = 5))
+
+cat("Mejor configuracion lineal:\n")
+cat("C:", tune_lineal$best.parameters$cost, "\n")
+cat("Error CV:", round(tune_lineal$best.performance, 4), "\n\n")
+cat("Mejor configuracion RBF:\n")
+cat("C:", tune_rbf$best.parameters$cost, "\n")
+cat("Gamma:", tune_rbf$best.parameters$gamma, "\n")
+cat("Error CV:", round(tune_rbf$best.performance, 4), "\n")
+```
+
+Con base en el tuneo exploratorio, el Modelo 1 usa kernel lineal con C = `r tune_lineal$best.parameters$cost`, y el Modelo 2 usa kernel RBF con C = `r tune_rbf$best.parameters$cost` y gamma = `r tune_rbf$best.parameters$gamma`, con el objetivo de identificar si la frontera no lineal funciona mejor sobre el dataset.
+
+```{r modelo-lineal}
+set.seed(123)
+modelo_lineal <- svm(price_cat ~ ., data = train_svm,
+kernel = "linear",
+cost = tune_lineal$best.parameters$cost,
+scale = FALSE)
+
+cat("Modelo 1 — Kernel lineal\n")
+cat("C:", modelo_lineal$cost, "\n")
+cat("Vectores de soporte:", nrow(modelo_lineal$SV), "\n")
+```
+
+```{r modelo-rbf}
+set.seed(123)
+modelo_rbf <- svm(price_cat ~ ., data = train_svm,
+kernel = "radial",
+cost = tune_rbf$best.parameters$cost,
+gamma = tune_rbf$best.parameters$gamma,
+scale = FALSE)
+
+cat("Modelo 2 — Kernel RBF\n")
+cat("C:", modelo_rbf$cost, "\n")
+cat("Gamma:", modelo_rbf$gamma, "\n")
+cat("Vectores de soporte:", nrow(modelo_rbf$SV), "\n")
+```
+
+Para el tercer modelo, se trató de trabajar sobre un rango de valores cercano a los hiperparámetros que habían presentado mejores resultados entre los dos modelos anteriores.
+
+```{r tune-fino}
+mejor_c <- tune_rbf$best.parameters$cost
+mejor_gamma <- tune_rbf$best.parameters$gamma
+
+set.seed(123)
+tune_rbf_fino <- tune(svm, price_cat ~ ., data = train_tune,
+kernel = "radial",
+ranges = list(
+cost = c(mejor_c * 0.2, mejor_c * 0.5, mejor_c, mejor_c * 2, mejor_c * 5),
+gamma = c(mejor_gamma * 0.2, mejor_gamma * 0.5, mejor_gamma, mejor_gamma * 2)
+),
+tunecontrol = tune.control(sampling = "cross", cross = 5))
+
+cat("Modelo 3 — Tuneo fino RBF\n")
+cat("C optimo:", tune_rbf_fino$best.parameters$cost, "\n")
+cat("Gamma optimo:", tune_rbf_fino$best.parameters$gamma, "\n")
+cat("Error CV:", round(tune_rbf_fino$best.performance, 4), "\n")
+```
+
+```{r modelo-rbf-tuned}
+set.seed(123)
+modelo_rbf_tuned <- svm(price_cat ~ ., data = train_svm,
+kernel = "radial",
+cost = tune_rbf_fino$best.parameters$cost,
+gamma = tune_rbf_fino$best.parameters$gamma,
+scale = FALSE)
+
+cat("Modelo 3 — Kernel RBF tuneado\n")
+cat("C:", modelo_rbf_tuned$cost, "\n")
+cat("Gamma:", modelo_rbf_tuned$gamma, "\n")
+cat("Vectores de soporte:", nrow(modelo_rbf_tuned$SV), "\n")
+```
+
+Al comparar los dos modelos iniciales, el RBF presentó mejores resultados que la versión lineal, por lo que el tercer modelo se orientó a tunear ese kernel con una grilla más fina. Tras la optimización, los mejores parámetros encontrados fueron C = 50 y gamma = 0.005, lo que indica que el modelo se beneficia de un margen más estricto combinado con una influencia más global de cada punto. Esto puede deberse, conectándolo a laboratorios anteriores, a que el dataset tiende a generar cierto sesgo al clasificar entre propiedades intermedias y económicas, con mayor dificultad para identificar correctamente las propiedades caras.
+
 ---
 
 ## **Actividad 5 — Predicción con los Modelos SVM**
