@@ -403,9 +403,40 @@ knitr::kable(tabla_ajuste, col.names = c("Modelo", "Accuracy Train", "Accuracy T
              caption = "Comparación de exactitud en entrenamiento y prueba")
 ```
 
+Tras analizar el rendimiento de todos los modelos generados con los datos de entrenamiento y los datos de prueba, se logra evidenciar un comportamiento en donde no hay sobreajuste. Se puede llegar a esta conclusión dado que la diferencia es bastante limitada entre la precisión en entrenamiento y la precisión en prueba. Por ejemplo, en el modelo lineal la diferencia es de tan solo 0.001, en el RBF es de 0.0162 y en el RBF tuneado de 0.0142. Al ser diferencias tan bajas, sin una brecha considerable entre ambos conjuntos, se puede afirmar que los modelos generalizan correctamente. Asimismo, dado que los resultados se mantienen por encima de 0.6 en prueba, tampoco se puede concluir que existe desajuste en ninguno de los tres modelos.
+
 ---
 
 ## **Actividad 8 — Comparación entre Modelos SVM**
+
+```{r comparacion-modelos-svm}
+errores <- nrow(test_svm)
+
+tabla_comp <- data.frame(
+Modelo = c("Lineal", "RBF", "RBF Tuneado"),
+Accuracy = c(0.6434, 0.6955, 0.6959),
+Kappa = c(0.4651, 0.5430, 0.5435),
+F1_Econ = c(0.7100, 0.7518, 0.7521),
+F1_Inter = c(0.5158, 0.6003, 0.6019),
+F1_Cara = c(0.7008, 0.7432, 0.7427),
+Errores = c(errores - round(0.6434 * errores),
+errores - round(0.6955 * errores),
+errores - round(0.6959 * errores)),
+Tiempo_pred = c(9.773, 10.732, 10.780)
+)
+
+knitr::kable(tabla_comp,
+col.names = c("Modelo", "Accuracy", "Kappa", "F1 Economica",
+"F1 Intermedia", "F1 Cara", "Errores", "Tiempo pred (s)"),
+caption = "Comparación de métricas entre los tres modelos SVM",
+digits = 4)
+```
+
+Al comparar los tres modelos, los dos RBF superan al lineal en exactitud (0.6955 y 0.6959 frente a 0.6434). La diferencia entre el RBF base y el RBF tuneado es prácticamente nula, con apenas 0.0003 de mejora en accuracy y un comportamiento casi idéntico por clase.
+
+Donde el modelo lineal sí presenta un comportamiento diferenciado es en la categoría Cara. Si bien su F1 para esa clase (0.7008) es menor que el de los modelos RBF (0.7432 y 0.7427), su distribución de predicciones fue la más cercana al conteo real de propiedades caras en el conjunto de prueba, mientras que los modelos RBF tienden a subestimar esa categoría en favor de Economica e Intermedia. Este comportamiento se ha visto evidenciado también en los otros modelos para categorización con los que se ha trabajado.
+
+La categoría que más errores genera en los tres modelos es Intermedia, con el F1 más bajo en todos los casos. Esto es consistente con lo observado en laboratorios anteriores: las propiedades de precio intermedio son las más difíciles de separar, ya que comparten características con las otras dos. En cuanto al tiempo de predicción, los tres modelos son comparables.
 
 ---
 
