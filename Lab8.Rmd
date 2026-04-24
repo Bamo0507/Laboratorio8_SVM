@@ -305,6 +305,35 @@ En cuanto al modelo lineal, presenta una dinámica distinta: sobreestima signifi
 
 ## **Actividad 7 — Análisis de Sobreajuste y Desajuste**
 
+Para establecer si un modelo está sobreajustado o desajustado, comparamos la exactitud, tratando de validar el rendimiento que se da en los datos de entrenamiento contra el conjunto de prueba. Si al modelo le va muy bien clasificando datos en el de entrenamiento y luego vemos una caída considerable en el conjunto de prueba, eso quiere decir que nuestro modelo muy probablemente va a estar sobreajustado. No obstante, si el rendimiento es pésimo en ambos conjuntos, quiere decir que está desajustado. 
+
+```{r sobreajuste-predicciones-train}
+pred_lineal_train <- predict(modelo_lineal, newdata = train_svm)
+pred_rbf_train <- predict(modelo_rbf, newdata = train_svm)
+pred_rbf_tuned_train <- predict(modelo_rbf_tuned,  newdata = train_svm)
+```
+
+```{r sobreajuste-tabla}
+acc <- function(real, pred) mean(as.character(real) == as.character(pred))
+
+real_train <- train_svm$price_cat
+real_test  <- test_svm$price_cat
+
+tabla_ajuste <- data.frame(
+  Modelo = c("Lineal", "RBF", "RBF Tuneado"),
+  Acc_Train = round(c(acc(real_train, pred_lineal_train),
+                            acc(real_train, pred_rbf_train),
+                            acc(real_train, pred_rbf_tuned_train)), 4),
+  Acc_Test = round(c(acc(real_test, pred_lineal),
+                            acc(real_test, pred_rbf),
+                            acc(real_test, pred_rbf_tuned)), 4)
+)
+tabla_ajuste$Diferencia <- round(tabla_ajuste$Acc_Train - tabla_ajuste$Acc_Test, 4)
+
+knitr::kable(tabla_ajuste, col.names = c("Modelo", "Accuracy Train", "Accuracy Test", "Diferencia"),
+             caption = "Comparación de exactitud en entrenamiento y prueba")
+```
+
 ---
 
 ## **Actividad 8 — Comparación entre Modelos SVM**
