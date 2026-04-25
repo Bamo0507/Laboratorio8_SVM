@@ -442,6 +442,23 @@ La categoría que más errores genera en los tres modelos es Intermedia, con el 
 
 ## **Actividad 9 — Comparación con Modelos de Clasificación Anteriores**
 
+```{r comparacion-clasificacion}
+tabla_clf <- data.frame(
+  Modelo    = c("Random Forest", "SVM RBF Tuneado", "Árbol de Decisión",
+                "KNN", "Regresión Logística", "Naive Bayes"),
+  Accuracy  = c(0.7563, 0.6959, 0.6696, 0.6593, 0.6415, 0.4139)
+)
+
+knitr::kable(tabla_clf,
+             col.names = c("Modelo", "Accuracy"),
+             caption = "Comparación de exactitud entre modelos de clasificación",
+             digits = 4)
+```
+
+Con los modelos generados en este laboratorio, el mejor fue el SVM RBF tuneado, con una exactitud de 0.6959. Al compararlo con el resto de modelos de clasificación entrenados hasta la fecha, este se posiciona como el segundo mejor, superando a KNN, al árbol de decisión, a la regresión logística multinomial y a Naive Bayes. El único modelo que presentó mejores resultados fue Random Forest.
+
+Un factor que puede explicar este rendimiento es la estructura del dataset. SVM tiende a destacar cuando la cantidad de variables es alta en relación con la cantidad de observaciones. En el dataset con el que se está trabajando tenemos 29 variables pero hay más de 43,000 observaciones. Dado este escenario, se podría explicar la razón detrás de que Random Forest tenga un mejor rendimiento, ya que al ser un modelo bastante complejo en donde se utilizan múltiples árboles con selección aleatoria de variables para tratar de explicar la variable objetivo, puede que esto se adecue más a la forma del dataset.
+
 ---
 
 ## **Actividad 10 — Tabla Comparativa de Sobreajuste (Todos los Modelos)**
