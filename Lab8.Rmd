@@ -11,20 +11,53 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-library(dplyr)
-library(ggplot2)
-library(caret)
-library(e1071)
-library(rpart)
-library(rpart.plot)
-library(randomForest)
-library(glmnet)
-library(pROC)
-library(nnet)
-library(kernlab)
-load("listings.RData")
 
-listings$price <- as.numeric(gsub("[$,]", "", listings$price))
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(caret)
+  library(e1071)
+  library(rpart)
+  library(rpart.plot)
+  library(randomForest)
+  library(nnet)
+})
+
+# Carga robusta de datos: permite tejer el documento tanto si el archivo se llama
+# listings.RData como si conserva el nombre usado al subirlo a ChatGPT.
+data_file <- dplyr::case_when(
+  file.exists("listings.RData") ~ "listings.RData",
+  file.exists("listings(6).RData") ~ "listings(6).RData",
+  file.exists("/mnt/data/listings(6).RData") ~ "/mnt/data/listings(6).RData",
+  TRUE ~ NA_character_
+)
+
+if (is.na(data_file)) {
+  stop("No se encontró listings.RData. Coloque el archivo en la misma carpeta del Rmd.")
+}
+
+datos_env <- new.env()
+load(data_file, envir = datos_env)
+
+if (exists("listings", envir = datos_env)) {
+  listings <- get("listings", envir = datos_env)
+} else {
+  objetos_df <- names(Filter(is.data.frame, as.list(datos_env)))
+  if (length(objetos_df) == 0) {
+    stop("El archivo RData no contiene un data frame utilizable.")
+  }
+  listings <- get(objetos_df[1], envir = datos_env)
+}
+
+if ("price" %in% names(listings)) {
+  if (is.character(listings$price) || is.factor(listings$price)) {
+    listings$price <- as.numeric(gsub("[$,]", "", as.character(listings$price)))
+  } else {
+    listings$price <- as.numeric(listings$price)
+  }
+} else {
+  stop("El dataset no contiene la variable price.")
+}
 
 vars_eliminar <- c(
   "id", "listing_url", "scrape_id", "picture_url",
@@ -46,14 +79,17 @@ vars_eliminar <- c(
 listings_clean <- listings[, !(names(listings) %in% vars_eliminar)]
 listings_model <- listings_clean[!is.na(listings_clean$price), ]
 
-set.seed(42)
-trainIndex <- sample(seq_len(nrow(listings_model)), size = floor(0.7 * nrow(listings_model)))
-train <- listings_model[ trainIndex, ]
-test <- listings_model[-trainIndex, ]
+# Se conservan únicamente variables numéricas para evitar errores de codificación
+# con SVM y modelos que dependen de distancias.
+listings_model_num <- listings_model[, sapply(listings_model, is.numeric)]
+listings_model_num <- listings_model_num[complete.cases(listings_model_num), ]
+listings_model_num <- listings_model_num[is.finite(rowSums(listings_model_num)), ]
 
-train_num <- na.omit(train[, sapply(train, is.numeric)])
-test_num  <- test[, names(train_num)]
-test_num  <- na.omit(test_num)
+set.seed(42)
+trainIndex <- sample(seq_len(nrow(listings_model_num)),
+                     size = floor(0.7 * nrow(listings_model_num)))
+train_num <- listings_model_num[ trainIndex, ]
+test_num  <- listings_model_num[-trainIndex, ]
 
 q33 <- as.numeric(quantile(train_num$price, probs = 0.33, na.rm = TRUE))
 q67 <- as.numeric(quantile(train_num$price, probs = 0.67, na.rm = TRUE))
@@ -71,12 +107,66 @@ test_clf <- test_num %>%
 train_tree_clf <- train_clf %>% select(-price)
 test_tree_clf  <- test_clf  %>% select(-price)
 
+# Se eliminan variables con varianza casi nula porque pueden generar columnas
+# problemáticas al escalar o al entrenar modelos basados en distancia.
+nzv_vars <- caret::nearZeroVar(train_tree_clf %>% select(-price_cat), names = TRUE)
+if (length(nzv_vars) > 0) {
+  train_tree_clf <- train_tree_clf %>% select(-all_of(nzv_vars))
+  test_tree_clf  <- test_tree_clf  %>% select(-all_of(nzv_vars))
+}
+
+train_tree_clf$price_cat <- factor(train_tree_clf$price_cat,
+                                   levels = c("Economica", "Intermedia", "Cara"))
+test_tree_clf$price_cat <- factor(test_tree_clf$price_cat,
+                                  levels = c("Economica", "Intermedia", "Cara"))
+
 calc_rmse <- function(obs, pred) sqrt(mean((obs - pred)^2, na.rm = TRUE))
 calc_mae  <- function(obs, pred) mean(abs(obs - pred), na.rm = TRUE)
 calc_r2   <- function(obs, pred) {
   ss_res <- sum((obs - pred)^2, na.rm = TRUE)
   ss_tot <- sum((obs - mean(obs, na.rm = TRUE))^2, na.rm = TRUE)
   1 - ss_res / ss_tot
+}
+calc_acc <- function(real, pred) mean(as.character(real) == as.character(pred), na.rm = TRUE)
+
+calc_reg_row <- function(modelo, obs_train, pred_train, obs_test, pred_test) {
+  rmse_train <- calc_rmse(obs_train, pred_train)
+  rmse_test  <- calc_rmse(obs_test, pred_test)
+  mae_train  <- calc_mae(obs_train, pred_train)
+  mae_test   <- calc_mae(obs_test, pred_test)
+  r2_train   <- calc_r2(obs_train, pred_train)
+  r2_test    <- calc_r2(obs_test, pred_test)
+
+  data.frame(
+    Modelo = modelo,
+    RMSE_Train = rmse_train,
+    RMSE_Test = rmse_test,
+    MAE_Train = mae_train,
+    MAE_Test = mae_test,
+    R2_Train = r2_train,
+    R2_Test = r2_test,
+    Brecha_RMSE = rmse_test - rmse_train,
+    Brecha_R2 = r2_train - r2_test
+  )
+}
+
+diagnostico_clf <- function(acc_train, acc_test) {
+  gap <- acc_train - acc_test
+  dplyr::case_when(
+    gap > 0.07 ~ "Posible sobreajuste",
+    acc_train < 0.55 & acc_test < 0.55 ~ "Posible desajuste",
+    TRUE ~ "Sin evidencia fuerte"
+  )
+}
+
+diagnostico_reg <- function(rmse_train, rmse_test, r2_train, r2_test) {
+  gap_rmse <- rmse_test - rmse_train
+  gap_r2 <- r2_train - r2_test
+  dplyr::case_when(
+    gap_rmse > 0.25 * rmse_train & gap_r2 > 0.10 ~ "Posible sobreajuste",
+    r2_test < 0.10 ~ "Bajo ajuste",
+    TRUE ~ "Generalización aceptable"
+  )
 }
 ```
 
@@ -128,6 +218,7 @@ knitr::kable(head(resumen_escala, 10), digits = 2,
 ```{r escalado}
 scale_center <- colMeans(features_num)
 scale_sd <- apply(features_num, 2, sd)
+scale_sd[is.na(scale_sd) | scale_sd == 0] <- 1
 
 train_svm <- as.data.frame(scale(features_num,
                                   center = scale_center,
@@ -170,7 +261,7 @@ Para no definir los hiperparámetros a prueba y error, se realiza un tuneo sobre
 
 ```{r tune-exploratorio}
 set.seed(123)
-idx_tune <- sample(nrow(train_svm), 1500)
+idx_tune <- sample(nrow(train_svm), min(1500, nrow(train_svm)))
 train_tune <- train_svm[idx_tune, ]
 
 tune_lineal <- tune(svm, price_cat ~ ., data = train_tune,
@@ -256,7 +347,7 @@ cat("Gamma:", modelo_rbf_tuned$gamma, "\n")
 cat("Vectores de soporte:", nrow(modelo_rbf_tuned$SV), "\n")
 ```
 
-Al comparar los dos modelos iniciales, el RBF presentó mejores resultados que la versión lineal, por lo que el tercer modelo se orientó a tunear ese kernel con una grilla más fina. Tras la optimización, los mejores parámetros encontrados fueron C = 50 y gamma = 0.005, lo que indica que el modelo se beneficia de un margen más estricto combinado con una influencia más global de cada punto. Esto puede deberse, conectándolo a laboratorios anteriores, a que el dataset tiende a generar cierto sesgo al clasificar entre propiedades intermedias y económicas, con mayor dificultad para identificar correctamente las propiedades caras.
+Al comparar los dos modelos iniciales, el RBF presentó mejores resultados que la versión lineal, por lo que el tercer modelo se orientó a tunear ese kernel con una grilla más fina. Tras la optimización, los mejores parámetros encontrados fueron C = `r tune_rbf_fino$best.parameters$cost` y gamma = `r tune_rbf_fino$best.parameters$gamma`, lo que indica que el modelo se beneficia de un margen ajustado combinado con una influencia más controlada de cada punto. Esto puede deberse, conectándolo a laboratorios anteriores, a que el dataset tiende a generar cierto sesgo al clasificar entre propiedades intermedias y económicas, con mayor dificultad para identificar correctamente las propiedades caras.
 
 ---
 
@@ -410,67 +501,424 @@ Tras analizar el rendimiento de todos los modelos generados con los datos de ent
 ## **Actividad 8 — Comparación entre Modelos SVM**
 
 ```{r comparacion-modelos-svm}
-errores <- nrow(test_svm)
+extraer_f1 <- function(cm, clase) {
+  if (is.null(dim(cm$byClass)) || !"F1" %in% colnames(cm$byClass)) {
+    return(NA_real_)
+  }
+  fila <- grep(clase, rownames(cm$byClass), fixed = TRUE)
+  if (length(fila) == 0) return(NA_real_)
+  as.numeric(cm$byClass[fila[1], "F1"])
+}
 
 tabla_comp <- data.frame(
-Modelo = c("Lineal", "RBF", "RBF Tuneado"),
-Accuracy = c(0.6434, 0.6955, 0.6959),
-Kappa = c(0.4651, 0.5430, 0.5435),
-F1_Econ = c(0.7100, 0.7518, 0.7521),
-F1_Inter = c(0.5158, 0.6003, 0.6019),
-F1_Cara = c(0.7008, 0.7432, 0.7427),
-Errores = c(errores - round(0.6434 * errores),
-errores - round(0.6955 * errores),
-errores - round(0.6959 * errores)),
-Tiempo_pred = c(9.773, 10.732, 10.780)
+  Modelo = c("Lineal", "RBF", "RBF Tuneado"),
+  Accuracy = c(
+    as.numeric(cm_lineal$overall["Accuracy"]),
+    as.numeric(cm_rbf$overall["Accuracy"]),
+    as.numeric(cm_rbf_tuned$overall["Accuracy"])
+  ),
+  Kappa = c(
+    as.numeric(cm_lineal$overall["Kappa"]),
+    as.numeric(cm_rbf$overall["Kappa"]),
+    as.numeric(cm_rbf_tuned$overall["Kappa"])
+  ),
+  F1_Economica = c(
+    extraer_f1(cm_lineal, "Economica"),
+    extraer_f1(cm_rbf, "Economica"),
+    extraer_f1(cm_rbf_tuned, "Economica")
+  ),
+  F1_Intermedia = c(
+    extraer_f1(cm_lineal, "Intermedia"),
+    extraer_f1(cm_rbf, "Intermedia"),
+    extraer_f1(cm_rbf_tuned, "Intermedia")
+  ),
+  F1_Cara = c(
+    extraer_f1(cm_lineal, "Cara"),
+    extraer_f1(cm_rbf, "Cara"),
+    extraer_f1(cm_rbf_tuned, "Cara")
+  ),
+  Errores = c(
+    sum(as.character(pred_lineal) != as.character(test_svm$price_cat)),
+    sum(as.character(pred_rbf) != as.character(test_svm$price_cat)),
+    sum(as.character(pred_rbf_tuned) != as.character(test_svm$price_cat))
+  ),
+  Tiempo_pred = c(
+    as.numeric(tiempo_lineal["elapsed"]),
+    as.numeric(tiempo_rbf["elapsed"]),
+    as.numeric(tiempo_rbf_tuned["elapsed"])
+  )
 )
 
 knitr::kable(tabla_comp,
-col.names = c("Modelo", "Accuracy", "Kappa", "F1 Economica",
-"F1 Intermedia", "F1 Cara", "Errores", "Tiempo pred (s)"),
-caption = "Comparación de métricas entre los tres modelos SVM",
-digits = 4)
+  col.names = c("Modelo", "Accuracy", "Kappa", "F1 Economica",
+                "F1 Intermedia", "F1 Cara", "Errores", "Tiempo pred (s)"),
+  caption = "Comparación de métricas entre los tres modelos SVM",
+  digits = 4
+)
 ```
 
-Al comparar los tres modelos, los dos RBF superan al lineal en exactitud (0.6955 y 0.6959 frente a 0.6434). La diferencia entre el RBF base y el RBF tuneado es prácticamente nula, con apenas 0.0003 de mejora en accuracy y un comportamiento casi idéntico por clase.
+Al comparar los tres modelos, el mejor comportamiento se determina con base en el `Accuracy`, el `Kappa` y el F1 por clase. En general, el kernel RBF permite representar fronteras más flexibles que el kernel lineal, por lo que suele mejorar cuando la separación entre las categorías de precio no es completamente recta. Aun así, el resultado más importante no es solo cuál sube unas décimas en exactitud, sino cuál mantiene un comportamiento más estable entre las tres clases.
 
-Donde el modelo lineal sí presenta un comportamiento diferenciado es en la categoría Cara. Si bien su F1 para esa clase (0.7008) es menor que el de los modelos RBF (0.7432 y 0.7427), su distribución de predicciones fue la más cercana al conteo real de propiedades caras en el conjunto de prueba, mientras que los modelos RBF tienden a subestimar esa categoría en favor de Economica e Intermedia. Este comportamiento se ha visto evidenciado también en los otros modelos para categorización con los que se ha trabajado.
-
-La categoría que más errores genera en los tres modelos es Intermedia, con el F1 más bajo en todos los casos. Esto es consistente con lo observado en laboratorios anteriores: las propiedades de precio intermedio son las más difíciles de separar, ya que comparten características con las otras dos. En cuanto al tiempo de predicción, los tres modelos son comparables.
+La categoría que tiende a generar más errores es `Intermedia`, porque funciona como una zona de transición: varias propiedades comparten características con las económicas y con las caras. Por eso, aunque un modelo tenga buen rendimiento global, es importante revisar esta clase con cuidado y no quedarse únicamente con el accuracy general.
 
 ---
 
 ## **Actividad 9 — Comparación con Modelos de Clasificación Anteriores**
 
-```{r comparacion-clasificacion}
-tabla_clf <- data.frame(
-  Modelo    = c("Random Forest", "SVM RBF Tuneado", "Árbol de Decisión",
-                "KNN", "Regresión Logística", "Naive Bayes"),
-  Accuracy  = c(0.7563, 0.6959, 0.6696, 0.6593, 0.6415, 0.4139)
+Para comparar SVM contra los algoritmos trabajados anteriormente, se entrenan nuevamente modelos base usando el mismo conjunto de entrenamiento y prueba. Esto permite que la comparación sea más justa, porque todos los modelos se evalúan con la misma partición. En el caso de Random Forest y KNN se usa una muestra reproducible del conjunto de entrenamiento para reducir el costo computacional, pero las métricas se calculan sobre los conjuntos completos de entrenamiento y prueba.
+
+```{r modelos-clasificacion-anteriores}
+set.seed(123)
+
+modelo_arbol_clf <- rpart(
+  price_cat ~ .,
+  data = train_tree_clf,
+  method = "class",
+  control = rpart.control(cp = 0.005, minsplit = 30)
 )
 
-knitr::kable(tabla_clf,
-             col.names = c("Modelo", "Accuracy"),
-             caption = "Comparación de exactitud entre modelos de clasificación",
-             digits = 4)
+n_rf_clf <- min(10000, nrow(train_tree_clf))
+train_rf_clf <- train_tree_clf[sample(seq_len(nrow(train_tree_clf)), n_rf_clf), ]
+
+modelo_rf_clf <- randomForest(
+  price_cat ~ .,
+  data = train_rf_clf,
+  ntree = 150,
+  mtry = max(1, floor(sqrt(ncol(train_rf_clf) - 1))),
+  importance = FALSE
+)
+
+modelo_nb_clf <- e1071::naiveBayes(
+  price_cat ~ .,
+  data = train_tree_clf,
+  laplace = 1
+)
+
+n_knn_clf <- min(8000, nrow(train_svm))
+train_knn_clf <- train_svm[sample(seq_len(nrow(train_svm)), n_knn_clf), ]
+
+modelo_knn_clf <- caret::knn3(
+  price_cat ~ .,
+  data = train_knn_clf,
+  k = 7
+)
+
+modelo_logit_clf <- nnet::multinom(
+  price_cat ~ .,
+  data = train_svm,
+  trace = FALSE,
+  maxit = 300,
+  MaxNWts = 10000
+)
+
+pred_arbol_train <- predict(modelo_arbol_clf, newdata = train_tree_clf, type = "class")
+pred_arbol_test  <- predict(modelo_arbol_clf, newdata = test_tree_clf,  type = "class")
+
+pred_rf_train <- predict(modelo_rf_clf, newdata = train_tree_clf, type = "class")
+pred_rf_test  <- predict(modelo_rf_clf, newdata = test_tree_clf,  type = "class")
+
+pred_nb_train <- predict(modelo_nb_clf, newdata = train_tree_clf, type = "class")
+pred_nb_test  <- predict(modelo_nb_clf, newdata = test_tree_clf,  type = "class")
+
+pred_knn_train <- predict(modelo_knn_clf,
+                          newdata = train_svm %>% select(-price_cat),
+                          type = "class")
+pred_knn_test  <- predict(modelo_knn_clf,
+                          newdata = test_svm %>% select(-price_cat),
+                          type = "class")
+
+pred_logit_train <- predict(modelo_logit_clf, newdata = train_svm, type = "class")
+pred_logit_test  <- predict(modelo_logit_clf, newdata = test_svm,  type = "class")
+
+tabla_clf <- data.frame(
+  Modelo = c("Árbol de decisión", "Random Forest", "Naive Bayes",
+             "KNN", "Regresión logística", "SVM RBF Tuneado"),
+  Accuracy = c(
+    calc_acc(train_tree_clf$price_cat, pred_arbol_train),
+    calc_acc(train_tree_clf$price_cat, pred_rf_train),
+    calc_acc(train_tree_clf$price_cat, pred_nb_train),
+    calc_acc(train_svm$price_cat, pred_knn_train),
+    calc_acc(train_svm$price_cat, pred_logit_train),
+    calc_acc(train_svm$price_cat, pred_rbf_tuned_train)
+  ),
+  Accuracy_Test = c(
+    calc_acc(test_tree_clf$price_cat, pred_arbol_test),
+    calc_acc(test_tree_clf$price_cat, pred_rf_test),
+    calc_acc(test_tree_clf$price_cat, pred_nb_test),
+    calc_acc(test_svm$price_cat, pred_knn_test),
+    calc_acc(test_svm$price_cat, pred_logit_test),
+    calc_acc(test_svm$price_cat, pred_rbf_tuned)
+  )
+)
+
+tabla_clf <- tabla_clf %>%
+  mutate(
+    Brecha = Accuracy - Accuracy_Test
+  ) %>%
+  arrange(desc(Accuracy_Test))
+
+knitr::kable(
+  tabla_clf,
+  col.names = c("Modelo", "Accuracy Train", "Accuracy Test", "Brecha"),
+  caption = "Comparación de exactitud entre modelos de clasificación",
+  digits = 4
+)
 ```
 
-Con los modelos generados en este laboratorio, el mejor fue el SVM RBF tuneado, con una exactitud de 0.6959. Al compararlo con el resto de modelos de clasificación entrenados hasta la fecha, este se posiciona como el segundo mejor, superando a KNN, al árbol de decisión, a la regresión logística multinomial y a Naive Bayes. El único modelo que presentó mejores resultados fue Random Forest.
-
-Un factor que puede explicar este rendimiento es la estructura del dataset. SVM tiende a destacar cuando la cantidad de variables es alta en relación con la cantidad de observaciones. En el dataset con el que se está trabajando tenemos 29 variables pero hay más de 43,000 observaciones. Dado este escenario, se podría explicar la razón detrás de que Random Forest tenga un mejor rendimiento, ya que al ser un modelo bastante complejo en donde se utilizan múltiples árboles con selección aleatoria de variables para tratar de explicar la variable objetivo, puede que esto se adecue más a la forma del dataset.
+Con esta comparación se puede revisar el rendimiento de SVM en relación con otros modelos clásicos de clasificación. Random Forest suele ser un competidor fuerte porque combina muchos árboles y reduce parte de la variabilidad de un solo árbol de decisión. SVM, por otro lado, aprovecha bien el escalamiento de variables y puede construir fronteras de decisión más flexibles, especialmente con kernel RBF. En este caso, el mejor modelo de clasificación se selecciona por su desempeño en prueba, ya que esa métrica representa mejor cómo se comportaría el modelo con propiedades nuevas.
 
 ---
 
 ## **Actividad 10 — Tabla Comparativa de Sobreajuste (Todos los Modelos)**
 
+Para analizar sobreajuste no basta con mirar qué modelo tiene el accuracy más alto. Lo que se debe comparar es el comportamiento en entrenamiento contra el comportamiento en prueba. Si el rendimiento en entrenamiento es bastante mayor que en prueba, el modelo probablemente aprendió detalles muy específicos del conjunto de entrenamiento y no generaliza tan bien. Si ambos rendimientos son bajos, el problema se acerca más a desajuste.
+
+```{r actividad-10-sobreajuste-todos}
+tabla_sobreajuste_clf <- data.frame(
+  Modelo = c("Árbol de decisión", "Random Forest", "Naive Bayes", "KNN",
+             "Regresión logística", "SVM Lineal", "SVM RBF", "SVM RBF Tuneado"),
+  Accuracy_Train = c(
+    calc_acc(train_tree_clf$price_cat, pred_arbol_train),
+    calc_acc(train_tree_clf$price_cat, pred_rf_train),
+    calc_acc(train_tree_clf$price_cat, pred_nb_train),
+    calc_acc(train_svm$price_cat, pred_knn_train),
+    calc_acc(train_svm$price_cat, pred_logit_train),
+    calc_acc(train_svm$price_cat, pred_lineal_train),
+    calc_acc(train_svm$price_cat, pred_rbf_train),
+    calc_acc(train_svm$price_cat, pred_rbf_tuned_train)
+  ),
+  Accuracy_Test = c(
+    calc_acc(test_tree_clf$price_cat, pred_arbol_test),
+    calc_acc(test_tree_clf$price_cat, pred_rf_test),
+    calc_acc(test_tree_clf$price_cat, pred_nb_test),
+    calc_acc(test_svm$price_cat, pred_knn_test),
+    calc_acc(test_svm$price_cat, pred_logit_test),
+    calc_acc(test_svm$price_cat, pred_lineal),
+    calc_acc(test_svm$price_cat, pred_rbf),
+    calc_acc(test_svm$price_cat, pred_rbf_tuned)
+  )
+)
+
+tabla_sobreajuste_clf <- tabla_sobreajuste_clf %>%
+  mutate(
+    Error_Train = 1 - Accuracy_Train,
+    Error_Test = 1 - Accuracy_Test,
+    Brecha_Accuracy = Accuracy_Train - Accuracy_Test,
+    Diagnostico = diagnostico_clf(Accuracy_Train, Accuracy_Test)
+  ) %>%
+  arrange(desc(Accuracy_Test))
+
+knitr::kable(
+  tabla_sobreajuste_clf,
+  col.names = c("Modelo", "Accuracy Train", "Accuracy Test",
+                "Error Train", "Error Test", "Brecha Accuracy", "Diagnóstico"),
+  caption = "Comparación de sobreajuste para los modelos de clasificación",
+  digits = 4
+)
+```
+
+La tabla permite ver de forma más clara si un modelo está aprendiendo demasiado del entrenamiento. En clasificación, los parámetros más útiles para revisar son el `Accuracy` de entrenamiento y prueba, el error en ambos conjuntos, la brecha entre ambos y, cuando se necesita más detalle, el F1 por clase. Una brecha pequeña indica que el modelo generaliza de manera razonable; una brecha grande indica posible sobreajuste.
+
+En este análisis, el modelo que debe elegirse no necesariamente es el que tenga el mayor rendimiento en entrenamiento, sino el que logre un buen equilibrio entre rendimiento en prueba y estabilidad. Si un modelo mejora mucho en entrenamiento, pero cae en prueba, esa mejora no es tan útil para SmartStay porque el objetivo real es estimar correctamente propiedades que todavía no se han visto.
+
 ---
 
 ## **Actividad 11 — Modelo de Regresión SVR**
+
+Para el modelo de regresión se utiliza directamente la variable `price`, porque ahora el objetivo no es clasificar las propiedades como económicas, intermedias o caras, sino estimar el precio numérico. Como SVR también depende de distancias y márgenes, las variables predictoras se estandarizan antes de entrenar el modelo. El tuneo se hace sobre una muestra del conjunto de entrenamiento para reducir el costo computacional, pero siempre conservando la misma partición general de entrenamiento y prueba.
+
+```{r actividad-11-preparacion-svr}
+train_reg <- train_num %>%
+  filter(!is.na(price), is.finite(price), price >= 0)
+
+test_reg <- test_num %>%
+  filter(!is.na(price), is.finite(price), price >= 0)
+
+x_train_reg <- train_reg %>% select(-price)
+x_test_reg  <- test_reg  %>% select(-price)
+
+nzv_reg <- caret::nearZeroVar(x_train_reg, names = TRUE)
+if (length(nzv_reg) > 0) {
+  x_train_reg <- x_train_reg %>% select(-all_of(nzv_reg))
+  x_test_reg  <- x_test_reg  %>% select(-all_of(nzv_reg))
+}
+
+reg_center <- colMeans(x_train_reg)
+reg_sd <- apply(x_train_reg, 2, sd)
+reg_sd[is.na(reg_sd) | reg_sd == 0] <- 1
+
+train_reg_svm <- as.data.frame(scale(x_train_reg, center = reg_center, scale = reg_sd))
+test_reg_svm  <- as.data.frame(scale(x_test_reg,  center = reg_center, scale = reg_sd))
+
+train_reg_svm$price <- train_reg$price
+test_reg_svm$price  <- test_reg$price
+
+cat("Observaciones de entrenamiento para regresion:", nrow(train_reg_svm), "\n")
+cat("Observaciones de prueba para regresion:", nrow(test_reg_svm), "\n")
+```
+
+```{r actividad-11-tuneo-svr}
+set.seed(456)
+
+n_svr_tune <- min(1500, nrow(train_reg_svm))
+idx_svr_tune <- sample(seq_len(nrow(train_reg_svm)), n_svr_tune)
+train_svr_tune <- train_reg_svm[idx_svr_tune, ]
+
+tune_svr <- tune(
+  svm,
+  price ~ .,
+  data = train_svr_tune,
+  kernel = "radial",
+  ranges = list(
+    cost = c(1, 10, 100),
+    gamma = c(0.001, 0.005, 0.01),
+    epsilon = c(0.1, 0.5, 1)
+  ),
+  tunecontrol = tune.control(sampling = "cross", cross = 5)
+)
+
+cat("Mejores parametros del SVR:\n")
+print(tune_svr$best.parameters)
+cat("\nError de validacion cruzada:", round(tune_svr$best.performance, 4), "\n")
+```
+
+```{r actividad-11-modelo-svr}
+set.seed(456)
+
+n_svr_final <- min(5000, nrow(train_reg_svm))
+idx_svr_final <- sample(seq_len(nrow(train_reg_svm)), n_svr_final)
+train_svr_final <- train_reg_svm[idx_svr_final, ]
+
+tiempo_svr_train <- system.time(
+  modelo_svr <- svm(
+    price ~ .,
+    data = train_svr_final,
+    kernel = "radial",
+    cost = tune_svr$best.parameters$cost,
+    gamma = tune_svr$best.parameters$gamma,
+    epsilon = tune_svr$best.parameters$epsilon,
+    scale = FALSE
+  )
+)
+
+tiempo_svr_pred <- system.time({
+  pred_svr_train <- as.numeric(predict(modelo_svr, newdata = train_reg_svm))
+  pred_svr_test  <- as.numeric(predict(modelo_svr, newdata = test_reg_svm))
+})
+
+pred_svr_train <- pmax(0, pred_svr_train)
+pred_svr_test  <- pmax(0, pred_svr_test)
+
+metricas_svr <- calc_reg_row(
+  "SVR radial",
+  train_reg_svm$price,
+  pred_svr_train,
+  test_reg_svm$price,
+  pred_svr_test
+)
+
+knitr::kable(
+  metricas_svr,
+  caption = "Métricas del modelo SVR",
+  digits = 4
+)
+
+cat("Tiempo de entrenamiento SVR:", round(tiempo_svr_train["elapsed"], 4), "s\n")
+cat("Tiempo de prediccion SVR:", round(tiempo_svr_pred["elapsed"], 4), "s\n")
+```
+
+El SVR radial permite capturar relaciones no lineales entre las características de las propiedades y su precio. A diferencia de una regresión lineal, no obliga a que el efecto de las variables sea completamente recto, lo cual tiene sentido para este problema porque el precio de un Airbnb puede depender de combinaciones de ubicación, capacidad, disponibilidad y características de la propiedad. La evaluación se hace con RMSE, MAE y R² para mantener la comparación en las mismas métricas que los modelos de regresión anteriores.
 
 ---
 
 ## **Actividad 12 — Comparación SVR con Modelos de Regresión Anteriores**
 
+Para comparar el SVR se construyen modelos de referencia sobre la misma variable respuesta (`price`). En la comparación se incluyen regresión lineal, árbol de regresión, Random Forest y KNN de regresión. Naive Bayes no se usa como modelo de regresión numérica porque su formulación vista en el laboratorio corresponde a clasificación; por eso no sería una comparación justa para predecir directamente el precio continuo.
+
+```{r actividad-12-modelos-regresion}
+set.seed(789)
+
+train_reg_lm <- train_reg %>% select(price, all_of(names(x_train_reg)))
+test_reg_lm  <- test_reg  %>% select(price, all_of(names(x_train_reg)))
+
+modelo_lm <- lm(price ~ ., data = train_reg_lm)
+pred_lm_train <- pmax(0, as.numeric(predict(modelo_lm, newdata = train_reg_lm)))
+pred_lm_test  <- pmax(0, as.numeric(predict(modelo_lm, newdata = test_reg_lm)))
+
+modelo_arbol_reg <- rpart(
+  price ~ .,
+  data = train_reg_lm,
+  method = "anova",
+  control = rpart.control(cp = 0.001, minsplit = 30)
+)
+pred_arbol_reg_train <- pmax(0, as.numeric(predict(modelo_arbol_reg, newdata = train_reg_lm)))
+pred_arbol_reg_test  <- pmax(0, as.numeric(predict(modelo_arbol_reg, newdata = test_reg_lm)))
+
+n_rf_reg <- min(10000, nrow(train_reg_lm))
+train_rf_reg <- train_reg_lm[sample(seq_len(nrow(train_reg_lm)), n_rf_reg), ]
+
+modelo_rf_reg <- randomForest(
+  price ~ .,
+  data = train_rf_reg,
+  ntree = 150,
+  mtry = max(1, floor(sqrt(ncol(train_rf_reg) - 1))),
+  importance = FALSE
+)
+pred_rf_reg_train <- pmax(0, as.numeric(predict(modelo_rf_reg, newdata = train_reg_lm)))
+pred_rf_reg_test  <- pmax(0, as.numeric(predict(modelo_rf_reg, newdata = test_reg_lm)))
+
+n_knn_reg <- min(8000, nrow(train_reg_svm))
+train_knn_reg <- train_reg_svm[sample(seq_len(nrow(train_reg_svm)), n_knn_reg), ]
+
+modelo_knn_reg <- caret::knnreg(
+  price ~ .,
+  data = train_knn_reg,
+  k = 7
+)
+pred_knn_reg_train <- pmax(0, as.numeric(predict(modelo_knn_reg, newdata = train_reg_svm)))
+pred_knn_reg_test  <- pmax(0, as.numeric(predict(modelo_knn_reg, newdata = test_reg_svm)))
+```
+
+```{r actividad-12-tabla-comparativa}
+metricas_regresion <- bind_rows(
+  calc_reg_row("Regresión lineal", train_reg_lm$price, pred_lm_train,
+               test_reg_lm$price, pred_lm_test),
+  calc_reg_row("Árbol de regresión", train_reg_lm$price, pred_arbol_reg_train,
+               test_reg_lm$price, pred_arbol_reg_test),
+  calc_reg_row("Random Forest", train_reg_lm$price, pred_rf_reg_train,
+               test_reg_lm$price, pred_rf_reg_test),
+  calc_reg_row("KNN regresión", train_reg_svm$price, pred_knn_reg_train,
+               test_reg_svm$price, pred_knn_reg_test),
+  metricas_svr
+) %>%
+  mutate(
+    Diagnostico = diagnostico_reg(RMSE_Train, RMSE_Test, R2_Train, R2_Test)
+  ) %>%
+  arrange(RMSE_Test)
+
+mejor_modelo_reg <- metricas_regresion[which.min(metricas_regresion$RMSE_Test), ]
+
+knitr::kable(
+  metricas_regresion,
+  caption = "Comparación de modelos para predicción del precio",
+  digits = 4
+)
+```
+
+El mejor modelo para estimar precios, según el menor RMSE en prueba, es **`r mejor_modelo_reg$Modelo`**. Esta selección se hace con el conjunto de prueba porque lo que interesa es saber qué tan bien generaliza el modelo con propiedades que no usó para entrenar. Además del RMSE, también se revisa el MAE, ya que este muestra el error promedio en unidades de precio y es más fácil de interpretar.
+
+En términos de sobreajuste, la columna de diagnóstico ayuda a revisar si el modelo tuvo un rendimiento demasiado alto en entrenamiento y luego perdió bastante rendimiento en prueba. Un buen modelo no solo debe tener bajo error, sino también una brecha razonable entre entrenamiento y prueba. Si un algoritmo tiene un RMSE muy bajo en entrenamiento pero mucho más alto en prueba, entonces probablemente aprendió patrones demasiado específicos del conjunto de entrenamiento.
+
 ---
 
 ## **Actividad 13 — Informe de Resultados**
+
+En este laboratorio se trabajó con modelos de máquinas vectoriales de soporte para dos objetivos distintos. Primero, se usó SVM como modelo de clasificación para predecir la categoría de precio de las propiedades (`Economica`, `Intermedia` y `Cara`). Después, se implementó un modelo SVR para estimar directamente el precio numérico de las viviendas.
+
+En la parte de clasificación se probaron tres versiones principales de SVM: kernel lineal, kernel RBF y kernel RBF tuneado. El uso del kernel RBF fue importante porque el problema no parece separarse de manera completamente lineal. Al revisar las matrices de confusión, se observa que la clase `Intermedia` es la más difícil de clasificar, lo cual tiene sentido porque es una categoría que queda entre propiedades baratas y caras. En cambio, las propiedades de los extremos tienden a ser más fáciles de distinguir porque sus características suelen estar más marcadas.
+
+Al comparar SVM con otros modelos de clasificación, el mejor modelo se identifica con base en el accuracy de prueba y la diferencia entre entrenamiento y prueba. En este tipo de análisis no conviene escoger solamente el modelo con mayor accuracy de entrenamiento, porque eso puede esconder sobreajuste. La comparación de sobreajuste muestra que el modelo más útil es el que mantiene buen desempeño en prueba sin aumentar demasiado la brecha con entrenamiento. Para el caso de SmartStay Advisors, esto es clave porque el modelo debe funcionar con propiedades nuevas, no solo con las que ya estaban dentro del dataset usado para entrenar.
+
+En la parte de regresión se entrenó un modelo SVR radial para estimar el precio directamente. También se comparó contra modelos base como regresión lineal, árbol de regresión, Random Forest y KNN de regresión. De acuerdo con las métricas calculadas, el mejor modelo de regresión fue **`r mejor_modelo_reg$Modelo`**, con un RMSE de prueba de **`r round(mejor_modelo_reg$RMSE_Test, 2)`** y un MAE de prueba de **`r round(mejor_modelo_reg$MAE_Test, 2)`**. Esta elección se justifica porque el RMSE penaliza más los errores grandes, algo relevante en precios de alojamiento, donde equivocarse mucho en una propiedad puede afectar directamente la recomendación que se le da al cliente.
+
+En conclusión, los modelos más complejos tienden a capturar mejor las relaciones del dataset, pero también se deben vigilar para evitar sobreajuste. Para clasificación, el análisis debe apoyarse en accuracy, Kappa, F1 por clase y la brecha entre entrenamiento y prueba. Para regresión, la decisión debe basarse principalmente en RMSE, MAE, R² y la comparación entre error de entrenamiento y prueba. Con estos resultados, SmartStay puede avanzar hacia un sistema más confiable para clasificar propiedades por nivel de precio y estimar precios competitivos usando datos reales de Airbnb.
