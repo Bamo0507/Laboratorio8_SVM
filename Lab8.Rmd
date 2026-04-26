@@ -127,6 +127,30 @@ calc_r2   <- function(obs, pred) {
   ss_tot <- sum((obs - mean(obs, na.rm = TRUE))^2, na.rm = TRUE)
   1 - ss_res / ss_tot
 }
+calc_acc <- function(real, pred) mean(as.character(real) == as.character(pred))
+
+calc_reg_row <- function(nombre, real_train, pred_train, real_test, pred_test) {
+  data.frame(
+    Modelo = nombre,
+    RMSE_Train = calc_rmse(real_train, pred_train),
+    MAE_Train = calc_mae(real_train, pred_train),
+    R2_Train = calc_r2(real_train, pred_train),
+    RMSE_Test = calc_rmse(real_test, pred_test),
+    MAE_Test = calc_mae(real_test, pred_test),
+    R2_Test = calc_r2(real_test, pred_test)
+  )
+}
+
+diagnostico_clf <- function(acc_train, acc_test, umbral = 0.10) {
+  ifelse(acc_train - acc_test > umbral, "Sobreajuste",
+         ifelse(acc_test < 0.55, "Desajuste", "Adecuado"))
+}
+
+diagnostico_reg <- function(rmse_train, rmse_test, r2_train, r2_test, umbral = 0.20) {
+  brecha <- (rmse_test - rmse_train) / pmax(rmse_train, 1)
+  ifelse(brecha > umbral, "Sobreajuste",
+         ifelse(r2_test < 0.20, "Desajuste", "Adecuado"))
+}
 calc_acc <- function(real, pred) mean(as.character(real) == as.character(pred), na.rm = TRUE)
 
 calc_reg_row <- function(modelo, obs_train, pred_train, obs_test, pred_test) {
@@ -600,7 +624,7 @@ train_knn_clf <- train_svm[sample(seq_len(nrow(train_svm)), n_knn_clf), ]
 modelo_knn_clf <- caret::knn3(
   price_cat ~ .,
   data = train_knn_clf,
-  k = 7
+  k = 21
 )
 
 modelo_logit_clf <- nnet::multinom(
@@ -827,7 +851,7 @@ cat("Tiempo de entrenamiento SVR:", round(tiempo_svr_train["elapsed"], 4), "s\n"
 cat("Tiempo de prediccion SVR:", round(tiempo_svr_pred["elapsed"], 4), "s\n")
 ```
 
-El SVR radial permite capturar relaciones no lineales entre las características de las propiedades y su precio. A diferencia de una regresión lineal, no obliga a que el efecto de las variables sea completamente recto, lo cual tiene sentido para este problema porque el precio de un Airbnb puede depender de combinaciones de ubicación, capacidad, disponibilidad y características de la propiedad. La evaluación se hace con RMSE, MAE y R² para mantener la comparación en las mismas métricas que los modelos de regresión anteriores.
+El SVR radial permite capturar relaciones no lineales entre las características de las propiedades y su precio. A diferencia de una regresión lineal, no obliga a que el efecto de las variables sea completamente recto, lo cual tiene sentido para este problema porque el precio de un Airbnb puede depender de combinaciones de ubicación, capacidad, disponibilidad y características de la propiedad. La evaluación se hace con RMSE, MAE y R2 para mantener la comparación en las mismas métricas que los modelos de regresión anteriores.
 
 ---
 
@@ -915,10 +939,10 @@ En términos de sobreajuste, la columna de diagnóstico ayuda a revisar si el mo
 
 En este laboratorio se trabajó con modelos de máquinas vectoriales de soporte para dos objetivos distintos. Primero, se usó SVM como modelo de clasificación para predecir la categoría de precio de las propiedades (`Economica`, `Intermedia` y `Cara`). Después, se implementó un modelo SVR para estimar directamente el precio numérico de las viviendas.
 
-En la parte de clasificación se probaron tres versiones principales de SVM: kernel lineal, kernel RBF y kernel RBF tuneado. El uso del kernel RBF fue importante porque el problema no parece separarse de manera completamente lineal. Al revisar las matrices de confusión, se observa que la clase `Intermedia` es la más difícil de clasificar, lo cual tiene sentido porque es una categoría que queda entre propiedades baratas y caras. En cambio, las propiedades de los extremos tienden a ser más fáciles de distinguir porque sus características suelen estar más marcadas.
+En la parte de clasificación se probaron tres versiones principales de SVM: kernel lineal, kernel RBF y kernel RBF tuneado. El uso del kernel RBF fue importante porque el problema no parece separarse de manera completamente lineal. Al revisar las matrices de confusión, se observa que la clase `Intermedia` es la más difícil de clasificar, lo cual tiene sentido porque es una categoría que queda entre propiedades Economica y Cara. En cambio, las propiedades de los extremos tienden a ser más fáciles de distinguir porque sus características suelen estar más marcadas.
 
 Al comparar SVM con otros modelos de clasificación, el mejor modelo se identifica con base en el accuracy de prueba y la diferencia entre entrenamiento y prueba. En este tipo de análisis no conviene escoger solamente el modelo con mayor accuracy de entrenamiento, porque eso puede esconder sobreajuste. La comparación de sobreajuste muestra que el modelo más útil es el que mantiene buen desempeño en prueba sin aumentar demasiado la brecha con entrenamiento. Para el caso de SmartStay Advisors, esto es clave porque el modelo debe funcionar con propiedades nuevas, no solo con las que ya estaban dentro del dataset usado para entrenar.
 
 En la parte de regresión se entrenó un modelo SVR radial para estimar el precio directamente. También se comparó contra modelos base como regresión lineal, árbol de regresión, Random Forest y KNN de regresión. De acuerdo con las métricas calculadas, el mejor modelo de regresión fue **`r mejor_modelo_reg$Modelo`**, con un RMSE de prueba de **`r round(mejor_modelo_reg$RMSE_Test, 2)`** y un MAE de prueba de **`r round(mejor_modelo_reg$MAE_Test, 2)`**. Esta elección se justifica porque el RMSE penaliza más los errores grandes, algo relevante en precios de alojamiento, donde equivocarse mucho en una propiedad puede afectar directamente la recomendación que se le da al cliente.
 
-En conclusión, los modelos más complejos tienden a capturar mejor las relaciones del dataset, pero también se deben vigilar para evitar sobreajuste. Para clasificación, el análisis debe apoyarse en accuracy, Kappa, F1 por clase y la brecha entre entrenamiento y prueba. Para regresión, la decisión debe basarse principalmente en RMSE, MAE, R² y la comparación entre error de entrenamiento y prueba. Con estos resultados, SmartStay puede avanzar hacia un sistema más confiable para clasificar propiedades por nivel de precio y estimar precios competitivos usando datos reales de Airbnb.
+En conclusión, los modelos más complejos tienden a capturar mejor las relaciones del dataset, pero también se deben vigilar para evitar sobreajuste. Para clasificación, el análisis debe apoyarse en accuracy, Kappa, F1 por clase y la brecha entre entrenamiento y prueba. Para regresión, la decisión debe basarse principalmente en RMSE, MAE, R2 y la comparación entre error de entrenamiento y prueba. Con estos resultados, SmartStay puede avanzar hacia un sistema más confiable para clasificar propiedades por nivel de precio y estimar precios competitivos usando datos reales de Airbnb.
